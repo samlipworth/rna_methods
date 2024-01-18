@@ -1,0 +1,948 @@
+---
+title: "RNA-Seq"
+author: "Sam Lipworth"
+date: "2024-01-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd('../rna_preprint/')
+library(tidyverse)
+library(edgeR)
+library(ggridges)
+library(patchwork)
+```
+
+## Reproducible manuscript
+
+This document re-produces the key results in "Comparison of direct cDNA and PCR-cDNA Nanopore sequencing of E. coli isolates" - Rodger/Lipworth et al 2024.
+
+## Description of isolates
+The four isolates used in this study were identified as belonging to STs 131 (A,C), 1193 (D) and an unclassified ST (B). A total of 36 antimicrobial resistance genes (ARGs) in total were identified: 12 in isolate A, 7 in isolate B, 7 in isolate C and 10 in isolate D (Table 1). The reference transcript sizes for each isolates were; Isolate A 5,425 coding sequences 4,758,606bp, Isolate B 5,570 coding sequences 4,830,938bp, Isolate C 5,523 coding sequences 4,809,970bp and Isolate D 5,191 coding sequences 4,564,879bp.
+
+*Note that this analysis can be re-produced by analysing the assemblies (in './assemblies'), as follows (note you will need to install the requisite software).*
+
+
+```{bash}
+seqkit stats assembly.fasta
+amrfinder -n assembly.fasta
+```
+
+## The PCR kit produces a greater sequencing yield but with shorter read lengths and lower quality scores
+
+The total data yield averaged across 4 flow cells after 72 hours and multiplexing 16 barcoded samples was 1.8Gb and 11.0Gb for the direct and PCR kits, respectively. However, median read lengths produced by the direct kit were longer than those produced by the PCR kit (501 bp [IQR: 390-603] versus 318 bp [IQR: 293-400]; p<0.001) (Fig. S3). Read quality (Fig. S4) was broadly comparable between kits, though slightly higher Q-score values were obtained for the direct versus PCR kit (median Q-score: 12.0 [IQR: 10.3-13.9] vs 11.2 [IQR: 10.4-12.1], p<0.001).
+
+
+```{r stats, echo=FALSE}
+out<-read_tsv('./data/read_length_qual.tsv')
+
+out %>% 
+  group_by(kit) %>% 
+  summarise(total=sum(length)/1e9)
+
+out %>%
+  group_by(kit) %>%
+  summarise(
+    Q1 = quantile(length, probs = 0.25),
+    Median = quantile(length, probs = 0.5),
+    Q3 = quantile(length, probs = 0.75),
+    .groups = 'drop' 
+  )
+kruskal.test(out$length ~ out$kit)
+
+
+out %>%
+  group_by(kit) %>%
+  summarise(
+    Q1 = quantile(quality, probs = 0.25),
+    Median = quantile(quality, probs = 0.5),
+    Q3 = quantile(quality, probs = 0.75),
+    .groups = 'drop' 
+  )
+
+kruskal.test(out$quality ~ out$kit)
+
+
+
+summary_stats <- out %>%
+  group_by(kit, isolate_anon) %>%
+  summarize(
+    Median = median(length),
+    Q1 = quantile(length, 0.25),
+    Q3 = quantile(length, 0.75)
+  )
+
+overall<-out
+overall$replicate<-"combined distribution"
+combined_data<-rbind(out,overall)
+
+
+combined_data$replicate<-factor(combined_data$replicate,levels=c("overall distribution", "replicate 2","replicate 1"))
+fig_S3 <- ggplot(combined_data, aes(x = length, y = replicate, fill = replicate)) +
+   geom_density_ridges(alpha = 0.5, scale = 0.9) +
+   facet_wrap(~ isolate_anon + kit, ncol = 2, scales = 'free_y') +
+   theme_minimal() +
+   ggtitle("Read length comparison between kits") +
+   scale_x_log10() +
+   scale_y_discrete() +
+   xlab("Read length")  +
+   geom_vline(data = summary_stats, aes(xintercept = Median), linetype = "dashed", color = "red") +
+  labs(fill="")
+
+
+summary_stats <- out %>%
+  group_by(kit, isolate_anon) %>%
+  summarize(
+    Median = median(quality),
+    Q1 = quantile(quality, 0.25),
+    Q3 = quantile(quality, 0.75)
+  )
+
+
+fig_S4 <- ggplot(combined_data, aes(x = quality, y = replicate, fill = replicate)) +
+   geom_density_ridges(alpha = 0.5, scale = 0.9) +
+   facet_wrap(~ isolate_anon + kit, ncol = 2, scales = 'free_y') +
+   theme_minimal() +
+   ggtitle("Read quality comparison between kits") +
+   scale_x_log10() +
+   scale_y_discrete() +
+   xlab("Read quality")  +
+   geom_vline(data = summary_stats, aes(xintercept = Median), linetype = "dashed", color = "red") +
+  labs(fill="")
+```
+
+## Mappable reads are longer and higher quality and represent a greater proportion of total reads in the direct kit
+
+Overall, the percentage of reads that could be mapped to the respective reference transcript was higher for the direct vs the PCR kit (47%, IQR 41-55 vs 85% 77-88, p<0.001). Using the direct kit, there was no difference in the % of reads that could be mapped between isolates (Isolate A median 83% [IQR: 82-88] reads mapped, Isolate B median 86% [IQR: 80-87] reads mapped, Isolate C median 83% [IQR 76-89] reads mapped, Isolate D median 85% [IQR: 82-88] reads mapped; p=1.00), however this was not the case for the PCR kit (Isolate A median 48% [IQR: 42-55] reads mapped, Isolate B median 46% [IQR: 39-51] reads mapped, Isolate C median 61 [IQR: 48-64] reads mapped, Isolate D median 41 [IQR 38-47] reads mapped; p=0.02, Fig. S5). 
+
+```{r}
+
+stats<-read_tsv('./data/mapped_stats.tsv')
+
+stats<-select(stats,-bin)
+stats %>% 
+  group_by(kit,flowcell,isolate_anon,replicate) %>% 
+  summarise(pc_mapped=median(pc))
+
+
+
+stats %>% 
+  group_by(kit) %>% 
+  summarise(q1=quantile(pc,probs=c(0.25)),
+            q2=quantile(pc,probs=c(0.5)),
+            q3=quantile(pc,probs=c(0.75)))
+
+
+pcr<-filter(stats,kit=="PCR")
+direct<-filter(stats,kit=="direct")
+
+kruskal.test(direct$pc~ direct$isolate_anon)
+kruskal.test(pcr$pc~ pcr$isolate_anon)
+
+pcr %>% 
+  group_by(isolate_anon) %>% 
+  summarise(q1=quantile(pc,probs=c(0.25)),
+            q2=quantile(pc,probs=c(0.5)),
+            q3=quantile(pc,probs=c(0.75)))
+
+direct %>% 
+  group_by(isolate_anon) %>% 
+  summarise(q1=quantile(pc,probs=c(0.25)),
+            q2=quantile(pc,probs=c(0.5)),
+            q3=quantile(pc,probs=c(0.75)))
+
+stats$isolate_anon<-factor(stats$isolate_anon,levels=c("Isolate D","Isolate C","Isolate B","Isolate A"))
+
+figS5 <- ggplot(stats, aes(x=pc, y=isolate_anon, group=isolate_anon)) +
+  ggridges::geom_density_ridges(aes(fill=kit), alpha=0.7,scale=0.9) +
+  geom_point(aes(color=replicate), position=position_dodge(width=0.5)) +
+  theme_minimal() +
+  facet_wrap(~kit, scales = "free_y", ncol = 2) +
+  ylab("Isolate") +
+  xlab("% reads mapped to reference transcript") +
+  scale_fill_brewer(palette="Set1") +  
+  scale_color_brewer(palette="Set2")   
+
+```
+
+
+For both the direct and PCR kits, reads that could be mapped were longer (direct mapped median read length 510 bases [IQR: 388-608] versus direct unmapped median read length 361 bases [IQR: 298-466], p<0.001 and PCR mapped median read length 437 bases [IQR: 342-569] versus unmapped median read length 301 bases [IQR: 283-322], p<0.001). They were also of higher quality (direct mapped median Q score 12.4 [IQR: 10.4-14.3] versus direct unmapped median Q score 11.2 [IQR: 10.1-12.8], p<0.001 and PCR mapped median Q score 11.8 [IQR 10.9-12.7] versus unmapped median Q score 11.0 [IQR: 10.2-11.8], p<0.001) than those that could not be mapped (Fig. S6).
+
+```{r}
+
+######### mapped unmapped ##############
+
+mapped_D<-read_tsv('./data/D.tsv')
+mapped_D$which<-"mapped"
+mapped_D$isolate<-"D"
+mapped_D$kit<-"direct"
+mapped_D<-select(mapped_D,isolate,quals,lengths,which,kit,isolate)
+unmapped_D<-read_tsv('./data/D_unmapped.tsv')
+unmapped_D$which<-"unmapped"
+unmapped_D$isolate<-"D"
+unmapped_D$kit<-"direct"
+unmapped_D<-select(unmapped_D,isolate,quals,lengths,which,kit,isolate)
+
+mapped_A<-read_tsv('./data/A.tsv')
+mapped_A$which<-"mapped"
+mapped_A$isolate<-"A"
+mapped_A$kit<-"direct"
+mapped_A<-select(mapped_A,isolate,quals,lengths,which,kit,isolate)
+unmapped_A<-read_tsv('./data/A_unmapped.tsv')
+unmapped_A$which<-"unmapped"
+unmapped_A$isolate<-"A"
+unmapped_A$kit<-"direct"
+unmapped_A<-select(unmapped_A,isolate,quals,lengths,which,kit,isolate)
+
+mapped_B<-read_tsv('./data/B.tsv')
+mapped_B$which<-"mapped"
+mapped_B$isolate<-"B"
+mapped_B$kit<-"direct"
+mapped_B<-select(mapped_B,isolate,quals,lengths,which,kit,isolate)
+unmapped_B<-read_tsv('./data/B_unmapped.tsv')
+unmapped_B$which<-"unmapped"
+unmapped_B$isolate<-"B"
+unmapped_B$kit<-"direct"
+unmapped_B<-select(unmapped_B,isolate,quals,lengths,which,kit,isolate)
+
+mapped_C<-read_tsv('./data/C.tsv')
+mapped_C$which<-"mapped"
+mapped_C$isolate<-"C"
+mapped_C$kit<-"direct"
+mapped_C<-select(mapped_C,isolate,quals,lengths,which,kit,isolate)
+unmapped_C<-read_tsv('./data/C_unmapped.tsv')
+unmapped_C$which<-"unmapped"
+unmapped_C$isolate<-"C"
+unmapped_C$kit<-"direct"
+unmapped_C<-select(unmapped_C,isolate,quals,lengths,which,kit,isolate)
+
+mapped_D_PCR<-read_tsv('./data/D_PCR.tsv')
+mapped_D_PCR$which<-"mapped"
+mapped_D_PCR$isolate<-"D"
+mapped_D_PCR$kit<-"PCR"
+mapped_D_PCR<-select(mapped_D_PCR,isolate,quals,lengths,which,kit,isolate)
+unmapped_D_PCR<-read_tsv('./data/D_unmapped_PCR.tsv')
+unmapped_D_PCR$which<-"unmapped"
+unmapped_D_PCR$isolate<-"D"
+unmapped_D_PCR$kit<-"PCR"
+unmapped_D_PCR<-select(unmapped_D_PCR,isolate,quals,lengths,which,kit,isolate)
+
+mapped_A_PCR<-read_tsv('./data/A_PCR.tsv')
+mapped_A_PCR$which<-"mapped"
+mapped_A_PCR$isolate<-"A"
+mapped_A_PCR$kit<-"PCR"
+mapped_A_PCR<-select(mapped_A_PCR,isolate,quals,lengths,which,kit,isolate)
+unmapped_A_PCR<-read_tsv('./data/A_unmapped_PCR.tsv')
+unmapped_A_PCR$which<-"unmapped"
+unmapped_A_PCR$isolate<-"A"
+unmapped_A_PCR$kit<-"PCR"
+unmapped_A_PCR<-select(unmapped_A_PCR,isolate,quals,lengths,which,kit,isolate)
+
+mapped_B_PCR<-read_tsv('./data/B_PCR.tsv')
+mapped_B_PCR$which<-"mapped"
+mapped_B_PCR$isolate<-"B"
+mapped_B_PCR$kit<-"PCR"
+mapped_B_PCR<-select(mapped_B_PCR,isolate,quals,lengths,which,kit,isolate)
+unmapped_B_PCR<-read_tsv('./data/B_unmapped_PCR.tsv')
+unmapped_B_PCR$which<-"unmapped"
+unmapped_B_PCR$isolate<-"B"
+unmapped_B_PCR$kit<-"PCR"
+unmapped_B_PCR<-select(unmapped_B_PCR,isolate,quals,lengths,which,kit,isolate)
+
+mapped_C_PCR<-read_tsv('./data/C_PCR.tsv')
+mapped_C_PCR$which<-"mapped"
+mapped_C_PCR$isolate<-"C"
+mapped_C_PCR$kit<-"PCR"
+mapped_C_PCR<-select(mapped_C_PCR,isolate,quals,lengths,which,kit,isolate)
+unmapped_C_PCR<-read_tsv('./data/C_unmapped_PCR.tsv')
+unmapped_C_PCR$which<-"unmapped"
+unmapped_C_PCR$isolate<-"C"
+unmapped_C_PCR$kit<-"PCR"
+unmapped_C_PCR<-select(unmapped_C_PCR,isolate,quals,lengths,which,kit,isolate)
+
+all<-rbind(mapped_D,unmapped_D,mapped_A,unmapped_A,
+           mapped_C,unmapped_C,mapped_B,unmapped_B,
+           mapped_D_PCR,unmapped_D_PCR,mapped_A_PCR,unmapped_A_PCR,
+           mapped_C_PCR,unmapped_C_PCR,mapped_B_PCR,unmapped_B_PCR)
+
+all$isolate<-factor(all$isolate,levels=c("D","C","B","A"))
+all$kit<-factor(all$kit,levels=c("direct","PCR"))
+figS6<-ggplot(all) +
+  aes(x=quals,y=isolate) +
+  ggridges::geom_density_ridges(scale=0.9) + theme_minimal() + 
+  xlab("Quality score") + ylab("Isolate")+ facet_wrap(~which~kit)  +
+  
+  ggplot(all) +
+  aes(x=lengths,y=isolate) +
+  ggridges::geom_density_ridges(scale=0.9) + theme_minimal()+
+  xlab("Read lengths") + ylab("Isolate")  +scale_x_log10() +facet_wrap(~which~kit) 
+  
+
+direct<-filter(all,kit=="direct")
+pcr<-filter(all,kit=="PCR")
+
+direct %>% 
+  group_by(which) %>%  summarise(q1=quantile(lengths,probs=c(0.25)),
+                                            q2=quantile(lengths,probs=c(0.5)),
+                                            q3=quantile(lengths,probs=c(0.75)))
+      
+pcr %>% 
+  group_by(which) %>%  summarise(q1=quantile(lengths,probs=c(0.25)),
+                                 q2=quantile(lengths,probs=c(0.5)),
+                                 q3=quantile(lengths,probs=c(0.75)))  
+
+direct %>% 
+  group_by(which) %>%  summarise(q1=quantile(quals,probs=c(0.25)),
+                                 q2=quantile(quals,probs=c(0.5)),
+                                 q3=quantile(quals,probs=c(0.75)))
+
+pcr %>% 
+  group_by(which) %>%  summarise(q1=quantile(quals,probs=c(0.25)),
+                                 q2=quantile(quals,probs=c(0.5)),
+                                 q3=quantile(quals,probs=c(0.75)))
+
+kruskal.test(pcr$lengths ~ pcr$which)
+kruskal.test(pcr$quals ~ pcr$which)
+kruskal.test(direct$lengths ~ direct$which)
+kruskal.tst(direct$quals ~ direct$which)
+```
+
+## Read counts are strongly correlated for biological replicates and kits
+
+For n=3786/3213/3381/3998 (Isolates A-D respectively) individual genes, read counts were highly correlated between biological replicates for all isolates for both the direct and PCR kits (R2 range: 0.90-0.98, p<0.001, Fig. 2). The correlations between technologies were similarly strongly positive (R2 range: 0.93-0.96, p<0.001) although we observed that these correlations were weaker for genes with a higher GC content (here defined as GC content >52%) or lower GC content (defined as GC content <44%) (Fig. 3). Strong correlations between read counts were also seen amongst flowcells for biological replicates sequenced using the same kit (Fig. S7). Restricting only to antibiotic resistance genes (ARGs) also revealed very strong correlations between read counts for biological replicates and between kits (R2 range: 0.93-0.99, p<0.001).
+
+```{r}
+#########plot correlations A ##################
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('A_A_',files)|grepl('A_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+rrna<-read_tsv('./data/all_rrna',col_names = 'gene')
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+degust<-data.frame(y$counts)
+
+
+
+args<-read_tsv('./data/A_args',col_names = 'gene')
+degust_arg<-filter(degust, rownames(degust) %in% args$gene)
+
+degust<-data.frame(y$counts)
+
+degust$sumAPCR<-rowSums(degust[,5:8])
+degust$sumBPCR<-rowSums(degust[,13:16])
+degust$sumADir<-rowSums(degust[,1:4])
+degust$sumBDir<-rowSums(degust[,9:12])
+
+
+A_withintech_PCR<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumBPCR)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate A PCR") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+A_withintech_dir<-ggplot(degust) +
+  aes(x=log10(sumADir),y=log10(sumBDir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate A Direct") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+A_betweentech<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumADir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate A PCR vs Direct")
+
+
+#########plot correlations C ###############
+
+
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('C_A_',files)| grepl('C_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-paste0(x[,1],'_',y[,2])
+replicate<-y[,1]
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~0 +replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+degust<-data.frame(y$counts)
+args<-read_tsv('./data/C_args',col_names = 'gene')
+degust_arg<-filter(degust, rownames(degust) %in% args$gene)
+
+
+
+y<-DGEList(count=degust)
+keep<-filterByExpr(y,min.count=1)
+y <- y[keep, , keep.lib.sizes=FALSE]
+
+degust<-data.frame(y$counts)
+
+degust$sumAPCR<-rowSums(degust[,5:8])
+degust$sumBPCR<-rowSums(degust[,13:16])
+degust$sumADir<-rowSums(degust[,1:4])
+degust$sumBDir<-rowSums(degust[,9:12])
+
+
+C_withintech_PCR<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumBPCR)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate C PCR") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+C_withintech_dir<-ggplot(degust) +
+  aes(x=log10(sumADir),y=log10(sumBDir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate C Direct") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+C_betweentech<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumADir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate C PCR vs Direct")
+
+
+#########plot correlations B ###############
+
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('B_A_',files)| grepl('B_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+degust<-data.frame(y$counts)
+
+args<-read_tsv('./data/B_args',col_names = 'gene')
+degust_arg<-filter(degust, rownames(degust) %in% args$gene)
+
+degust_arg$sumAPCR<-rowSums(degust_arg[,5:8])
+degust_arg$sumBPCR<-rowSums(degust_arg[,13:16])
+degust_arg$sumADir<-rowSums(degust_arg[,1:4])
+degust_arg$sumBDir<-rowSums(degust_arg[,9:12])
+
+
+
+degust_arg_B<-select(degust_arg,sumAPCR,sumADir,sumBPCR,sumBDir)
+#degust_arg_B$which<-'B'
+
+degust<-data.frame(y$counts)
+
+degust$sumAPCR<-rowSums(degust[,5:8])
+degust$sumBPCR<-rowSums(degust[,13:16])
+degust$sumADir<-rowSums(degust[,1:4])
+degust$sumBDir<-rowSums(degust[,9:12])
+
+
+B_withintech_PCR<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumBPCR)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate B PCR") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+B_withintech_dir<-ggplot(degust) +
+  aes(x=log10(sumADir),y=log10(sumBDir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate B Direct") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+B_betweentech<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumADir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate B PCR vs Direct")
+
+
+
+#########plot correlations D ###############
+
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('D_A_',files)|grepl('D_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+
+degust<-data.frame(y$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+
+args<-read_tsv('./data/D_args',col_names = 'gene')
+degust_arg<-filter(degust, rownames(degust) %in% args$gene)
+
+
+degust_arg$sumAPCR<-rowSums(degust_arg[,5:8])
+degust_arg$sumBPCR<-rowSums(degust_arg[,13:16])
+degust_arg$sumADir<-rowSums(degust_arg[,1:4])
+degust_arg$sumBDir<-rowSums(degust_arg[,9:12])
+
+
+
+degust_arg_D<-select(degust_arg,sumAPCR,sumADir,sumBPCR,sumBDir)
+#degust_arg_D$which<-'D'
+
+
+degust<-data.frame(y$counts)
+
+
+degust$sumAPCR<-rowSums(degust[,5:8])
+degust$sumBPCR<-rowSums(degust[,13:16])
+degust$sumADir<-rowSums(degust[,1:4])
+degust$sumBDir<-rowSums(degust[,9:12])
+
+
+D_withintech_PCR<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumBPCR)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate D PCR") + xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+D_withintech_dir<-ggplot(degust) +
+  aes(x=log10(sumADir),y=log10(sumBDir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate D Direct")+ xlab("Read CPM replicate 1") + ylab("Read CPM replicate 2")
+
+D_betweentech<-ggplot(degust) +
+  aes(x=log10(sumAPCR),y=log10(sumADir)) +
+  geom_point() + theme_minimal() + ggpubr::stat_cor(method="spearman") +
+  ggtitle("Isolate D PCR vs Direct")
+
+
+
+
+#############put it all together corrplot ################
+
+library(patchwork)
+
+fig2<-A_withintech_PCR+  B_withintech_PCR + C_withintech_PCR  +D_withintech_PCR  +  
+  
+A_withintech_dir + B_withintech_dir + C_withintech_dir + D_withintech_dir +
+  plot_annotation(title = "Comparing biological replicates sequenced using the same kit")  +plot_layout(nrow=2)
+
+```
+
+
+## Differences in gene expression by sequencing method
+
+Across the four isolates, of those annotated genes with reads mapping to them which were not rRNA and after correction for multiple comparisons, 678/14,378 (4.7%) genes were significantly differentially expressed between the direct and PCR kits (Fig. 4). In comparison only 31/14,378 (0.2%) genes were significantly differentially expressed between biological replicates of the same isolate.  There was no difference in the proportion of plasmid (13/317, 4.1%) and chromosomal genes (539/14,122, 3.8%) that were significantly differentially expressed between the direct and PCR kits (p=0.91). Similarly, none of the 36 ARGs in the analysis were significantly differentially expressed between kits.
+
+```{r}
+
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('C_A_',files)| grepl('C_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+
+
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+rrna<-read_tsv('./data/all_rrna',col_names = 'gene')
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+x[,1]<-str_replace_all(x[,1],'..data..','')
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-paste0(x[,1],'_',y[,2])
+replicate<-y[,1]
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~0 +replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+y<-calcNormFactors(y)
+
+
+rownames(design) <- colnames(degust)
+y<-estimateDisp(y,design,robust=T)
+
+
+fit<-glmQLFit(y,design,robust=T)
+biological_replicates <- makeContrasts(replicateA- replicateB, levels = design)
+qlf<-glmQLFTest(fit,contrast = biological_replicates)
+#plotMD(qlf)
+summary(decideTests(qlf),adjust.method="bonf")
+2
+3379 +2
+2/3381
+
+pcr_vs_direct <- makeContrasts(kitC_PCR, levels = design)
+qlf<-glmQLFTest(fit,contrast = pcr_vs_direct)
+plotMD(qlf)
+summary(decideTests(qlf),adjust.method="bonf")
+
+
+84+133
+84+133+3164
+
+217/3381
+
+t<-qlf$table
+
+t$pad<-p.adjust(t$PValue,method = "bonf")
+t$sig<-ifelse(t$pad < 0.05,'significant','not significant')
+
+
+
+arg<-read_tsv('./data/C_args',col_names = F)
+t$ARG<-ifelse(rownames(t) %in% arg$X1,1,0)
+
+table(t$sig,t$ARG)
+
+#0/0 ARG
+
+
+genes<-read_tsv('./data/C_genes.tsv') %>% filter(!is.na(Gene))
+t$gene<-rownames(t)
+t<-left_join(t,genes,by=c("gene"="Locus Tag"))
+
+
+
+lfc_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logFC)) %>% head(5)
+cpm_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logCPM)) %>% head(5)
+
+t$Gene<-ifelse(t$gene %in% lfc_keep$gene | t$gene %in% cpm_keep$gene,t$Gene,NA)
+C<-ggplot(t) +
+  aes(x=logCPM,y=logFC, color=sig,alpha=ifelse(sig=="not significant",0.5,1)) +
+  geom_point() + labs(color="") +
+  theme_minimal() + ggtitle("Isolate C") +
+  ggrepel::geom_text_repel(data=t,aes(label=Gene)) +
+  guides(alpha="none")
+
+
+############
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('B_A_',files) | grepl('B_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+x[,1]<-str_replace_all(x[,1],'..data..','')
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+y<-calcNormFactors(y)
+
+
+rownames(design) <- colnames(degust)
+y<-estimateDisp(y,design,robust=T)
+
+
+fit<-glmQLFit(y,design,robust=T)
+
+
+biological_replicates<-makeContrasts(replicateA - replicateB, levels=design)
+qlf<-glmQLFTest(fit,contrast = biological_replicates)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+2
+3211+2
+
+2/3213
+
+pcr_vs_direct<-makeContrasts(kitB_PCR, levels=design)
+qlf<-glmQLFTest(fit,contrast = pcr_vs_direct)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+43+61
+43+61+3109
+
+104/3213
+
+t<-qlf$table
+
+t$pad<-p.adjust(t$PValue,method = "bonf")
+t$sig<-ifelse(t$pad < 0.05,"significant","not significant")
+
+arg<-read_tsv('./data/B_args',col_names = F)
+t$ARG<-ifelse(rownames(t) %in% arg$X1,1,0)
+
+table(t$ARG,t$sig)
+
+#0/3
+
+genes<-read_tsv('./data/B_genes.tsv') %>% filter(!is.na(Gene))
+t$gene<-rownames(t)
+t<-left_join(t,genes,by=c("gene"="Locus Tag"))
+
+lfc_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logFC)) %>% head(5)
+cpm_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logCPM)) %>% head(5)
+
+t$Gene<-ifelse(t$gene %in% lfc_keep$gene | t$gene %in% cpm_keep$gene,t$Gene,NA)
+
+B<-ggplot(t) +
+  aes(x=logCPM,y=logFC, color=sig,alpha=ifelse(sig=="not significant",0.5,1)) +
+  geom_point() + theme_minimal() +
+  ggtitle("Isolate B") + labs(color="")  +
+  ggrepel::geom_text_repel(data=t,aes(label=Gene)) +
+  guides(alpha="none")
+
+#############
+
+files <- list.files(path="./data", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('D_A_',files) | grepl('D_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+x[,1]<-str_replace_all(x[,1],'..data.','')
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+y<-calcNormFactors(y)
+
+
+rownames(design) <- colnames(degust)
+y<-estimateDisp(y,design,robust=T)
+
+
+fit<-glmQLFit(y,design,robust=T)
+
+biological_replicates<-makeContrasts(replicateA - replicateB, levels=design)
+qlf<-glmQLFTest(fit,contrast = biological_replicates)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+10+5
+10+5+3983
+
+15/3998
+
+pcr_vs_direct<-makeContrasts(kitD_PCR, levels=design)
+qlf<-glmQLFTest(fit,contrast = pcr_vs_direct)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+85+115
+85+115+3798
+200/3998
+
+t<-qlf$table
+
+t$pad<-p.adjust(t$PValue,method = "bonf")
+t$sig<-ifelse(t$pad < 0.05,"significant","not significant")
+
+arg<-read_tsv('./data/D_args',col_names = F)
+t$ARG<-ifelse(rownames(t) %in% arg$X1,1,0)
+
+
+table(t$sig,t$ARG)
+
+#0/9 ARG sig
+
+genes<-read_tsv('./data/D_genes.tsv') %>% filter(!is.na(Gene))
+t$gene<-rownames(t)
+t<-left_join(t,genes,by=c("gene"="Locus Tag"))
+
+lfc_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logFC)) %>% head(5)
+cpm_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logCPM)) %>% head(5)
+
+t$Gene<-ifelse(t$gene %in% lfc_keep$gene | t$gene %in% cpm_keep$gene,t$Gene,NA)
+
+
+
+D<-ggplot(t) +
+  aes(x=logCPM,y=logFC, color=sig,alpha=ifelse(sig=="not significant",0.5,1)) +
+  geom_point() +
+  ggtitle("Isolate D") +
+  theme_minimal() +
+  labs(color="") +
+  ggrepel::geom_text_repel(data=t,aes(label=Gene)) +
+  guides(alpha="none")
+
+##############
+
+files <- list.files(path="./data/", pattern = '*.counts', full.names=T,recursive = F)
+files<-files[grepl('A_A_',files) | grepl('A_B_',files)]
+data<-readDGE(files)
+
+degust<-data.frame(data$counts)
+names(degust)<-str_replace_all(names(degust),'[.][.][.]','')
+
+#remove rrna
+degust<-filter(degust,!rownames(degust) %in% rrna$gene)
+
+x<-str_split_fixed(names(degust),pattern = '_',n=2)
+x[,1]<-str_replace_all(x[,1],'..data..','')
+y<-str_split_fixed(x[,2],pattern = '_',n=3)
+
+kit<-factor(paste0(x[,1],'_',y[,2]))
+replicate<-factor(y[,1])
+group<-paste0(kit,'_',replicate)
+y<-DGEList(count=degust,group=group)
+design<-model.matrix(~ 0+replicate+kit)
+keep<-filterByExpr(y,design,min.count=1)
+y<-y[keep, , keep.lib.sizes=F]
+
+
+y<-calcNormFactors(y)
+
+
+rownames(design) <- colnames(degust)
+y<-estimateDisp(y,design,robust=T)
+
+
+fit<-glmQLFit(y,design,robust=T)
+
+biological_replicates<-makeContrasts(replicateA - replicateB, levels=design)
+qlf<-glmQLFTest(fit,contrast = biological_replicates)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+7+5
+7+5+3774
+12/3786
+
+pcr_vs_direct<-makeContrasts(kitA_PCR, levels=design)
+qlf<-glmQLFTest(fit,contrast = pcr_vs_direct)
+plotMD(qlf)
+summary(decideTests(qlf,adjust.method = "bonf"))
+
+75+82
+75+82+3629
+157/3786
+
+t<-qlf$table
+
+t$pad<-p.adjust(t$PValue,method = "bonf")
+t$sig<-ifelse(t$pad < 0.05,"significant","not significant")
+
+arg<-read_tsv('./data/A_args',col_names = F)
+t$ARG<-ifelse(rownames(t) %in% arg$X1,1,0)
+
+
+table(t$sig,t$ARG)
+
+#0/0 arg sig
+
+
+genes<-read_tsv('./data/A_genes.tsv') %>% filter(!is.na(Gene))
+t$gene<-rownames(t)
+t<-left_join(t,genes,by=c("gene"="Locus Tag"))
+
+lfc_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logFC)) %>% head(5)
+cpm_keep<-t %>% filter(sig=="significant") %>% arrange(desc(logCPM)) %>% head(5)
+
+t$Gene<-ifelse(t$gene %in% lfc_keep$gene | t$gene %in% cpm_keep$gene,t$Gene,NA)
+
+
+A<-ggplot(t) +
+  aes(x=logCPM,y=logFC, color=sig,alpha=ifelse(sig=="not significant",0.5,1)) +
+  geom_point() + ggtitle("Isolate A") +
+  theme_minimal() +
+  labs(color="") +
+  ggrepel::geom_text_repel(data=t,aes(label=Gene)) +
+  guides(alpha="none")
+
+Fig8<-A+B+C+D +
+  plot_layout(guides="collect")
+
+#kits
+217+104+200+157
+3381+3213+3998+3786
+
+678/14378
+
+#bio
+12+15+2+2
+31/14378
+
+
+#arg
+0+0+9+3
+0/12
+
+```
+
+
