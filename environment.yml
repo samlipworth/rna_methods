@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+  - r
+  - bioconda
+dependencies:
+  - r-tidyverse
+  - bioconductor-edger
+  - r-ggridges
+  - r-patchwork
